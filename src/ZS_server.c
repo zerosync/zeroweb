@@ -39,41 +39,55 @@ nopoll_bool on_connection_opened (noPollCtx * ctx, noPollConn * conn, noPollPtr 
     return nopoll_true;
 }
 
+/**
+  *
+  * This function is a helper function, that deletes a file, chosen by the Javascriptclient
+  *
+  **/
 void deleteMsg (char *path_to_file) 
 {
     if (remove(path_to_file) < 0) {
         printf("ERROR: An error occured, while deleting the file %s \n", path_to_file);
         return;
     }
+
 }
- 
+
+/**
+  *
+  * This is the msg handler. This huge function handles all messages. The messages can be differenced by their prefixes. A 'ZSFDEL content' command 
+  * signals a delete operation. A 'ZSF xxxx content' (xxxx -> 4 byte file length) is an intializing msg, that the following msgs, are frames from a file. 
+  * It also should handle the freeing of all variables, which aren´ t used in future. //TODO BUG: there is an issue, that the server can´t handle the german Umlaut ä,ü,ö 
+  * in the deletion process. This issue is based on the UNICODE / ASCII charsets. 
+  * 
+  **/
 void handleMsg (noPollCtx *ctx, noPollConn *con, noPollMsg *msg, noPollPtr *user_data)
 {
-    unsigned long msg_size = nopoll_msg_get_payload_size(msg);
-    uint8_t *clientMsg = calloc (msg_size, sizeof(uint8_t)); 
-    clientMsg = (uint8_t *) nopoll_msg_get_payload(msg);
+    unsigned long msg_size = nopoll_msg_get_payload_size(msg);  //gets the size of the rcved msg
+    uint8_t *clientMsg = calloc (msg_size, sizeof(uint8_t));    
+    clientMsg = (uint8_t *) nopoll_msg_get_payload(msg);        //gets the msg in it´s int signature
  
+    // This condition, checks if the rcved msg is a file frame
     if (!fileIncome) {
         printf("Server received (size: %d)\n", nopoll_msg_get_payload_size(msg));
-        /* Check if the msg is the initializing CMD msg before the file msgs*/
-        char tmp[CMD_SIZE];
+        
+        char tmp[CMD_SIZE];                                     //tmp is a variable, where we save the prefix 'ZSF' to compare with our rcved msg
         fName = malloc((msg_size-CMD_SIZE)*sizeof(char));
         strncpy (tmp, clientMsg, 3);
         tmp[3] = '\0';
         
         printf("Server received msg: %s \n", (char *)clientMsg);
-        if (strcmp(tmp, "ZSF") == 0) { // if the cmd prefix is set in the msg, the following chars are the Name of the incoming file
-            if (strncmp(clientMsg, "ZSFDEL", 6) == 0) {
-                char *fName_toDelete = malloc(((msg_size-(CMD_SIZE +3))* sizeof(char)));
+        if (strcmp(tmp, "ZSF") == 0) {                          // if the cmd prefix is set in the msg , after another 4 bytes, the following chars are the Name of the incoming file
+            if (strncmp(clientMsg, "ZSFDEL", 6) == 0) {         //this condition checks the special 'ZSFDEL' <=> deletion command
+                char *fName_toDelete = malloc(((msg_size-(CMD_SIZE +3))* sizeof(char)));        
                 printf("Delete triggered!\n");
                 
                 int i;
                 for (i = 0; i < msg_size; i++){
-                    fName_toDelete[i] = clientMsg[i+(CMD_SIZE-1+3)]; // fill the filePath in the fName_toDelete string
+                    fName_toDelete[i] = clientMsg[i+(CMD_SIZE-1+3)]; // fill the filePath in the fName_toDelete string (CMD_SIZE -1 byte \0 + 3 byte DEL cmd)
                 }
                 fName_toDelete[strlen(fName_toDelete)] = '\0';
               
-                printf("deleting...%s \n", fName_toDelete); 
                 deleteMsg(fName_toDelete); 
                 free(fName_toDelete);
                 return;
@@ -81,18 +95,21 @@ void handleMsg (noPollCtx *ctx, noPollConn *con, noPollMsg *msg, noPollPtr *user
             fileIncome = true;
             
             int y;
-            // get uint32 from network byte order
+            // get uint32 (the 4 bytes file size) from network byte order
             msg_size_total = ((uint32_t) (clientMsg [3]) << 24)
                   + ((uint32_t) (clientMsg [4]) << 16)
                   + ((uint32_t) (clientMsg [5]) << 8)
                   +  (uint32_t) (clientMsg [6]);
+            
             for (y = 0; y < msg_size; y++){
-                fName[y] = clientMsg[y+(CMD_SIZE+4-1)]; // fill the fileName in the fName string
+                fName[y] = clientMsg[y+(CMD_SIZE+4-1)]; // fill the fileName in the fName string (CMD_SIZE + 4byte file length -1 byte \0
             }
+            
             printf("msg_size_total: %"PRIu32"\n" , msg_size_total);
             fName[strlen(fName)] = '\0';
-        }/* End of checking */
+        }
 
+    // the else block, handles a file frame
     } else {
         printf("Server received (size: %d)\n", nopoll_msg_get_payload_size(msg));
         printf("msg_size_total: %"PRIu32" size_count_total: %"PRIu32"\n" , msg_size_total, size_count_total);
@@ -103,11 +120,13 @@ void handleMsg (noPollCtx *ctx, noPollConn *con, noPollMsg *msg, noPollPtr *user
         strcat(fullPath, fName);
        
         printf("path: %s \n",fullPath); 
+        
         FILE *file = fopen(fullPath, "a+b");
         if (file == NULL){
             printf("ERROR: Could not open the file to write!\n");
             return;
         }
+
         int z;
         for (z=0; z<msg_size; z++) {
             if ((fwrite(&clientMsg[z],(size_t)1,(size_t)1,file))<0) {
@@ -115,10 +134,10 @@ void handleMsg (noPollCtx *ctx, noPollConn *con, noPollMsg *msg, noPollPtr *user
                 break;
             }
             size_count_total++;
-            if (size_count_total == msg_size_total) {
+            if (size_count_total == msg_size_total) {       //an intern counter counts the size, and if the full size of the file is received we can free the variables
                 printf ("File end reached.\n");
                 free (fName);
-                fileIncome = false; //finished file - grant access the next file
+                fileIncome = false; //finished file - grant access to the next file
                 msg_size_total = 0;
                 size_count_total = 0;
                 break;
@@ -130,6 +149,7 @@ void handleMsg (noPollCtx *ctx, noPollConn *con, noPollMsg *msg, noPollPtr *user
      
 }
 
+// The start of the nopoll Server
 int main (int argc, char **argv) 
 {
     if (argc != 2) {
